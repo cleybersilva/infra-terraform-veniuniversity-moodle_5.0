@@ -1,0 +1,118 @@
+name: Terraform Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Ambiente para destruição (dev, hom, prod)'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - hom
+          - prod
+
+env:
+  TF_VERSION: 1.0.0
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  TF_VAR_FILE: terraform.tfvars
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  approval:
+    name: Approval
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get approval
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ secrets.GITHUB_TOKEN }}
+          approvers: ${{ vars.INFRASTRUCTURE_ADMINS }}
+          minimum-approvals: 1
+          issue-title: "⚠️ ATENÇÃO: Solicitação para DESTRUIR ambiente ${{ github.event.inputs.environment }}"
+          issue-body: |
+            ⚠️ ATENÇÃO: Esta ação irá DESTRUIR COMPLETAMENTE o ambiente ${{ github.event.inputs.environment }}.
+            
+            Todos os recursos da AWS deste ambiente serão removidos permanentemente!
+            
+            Por favor, aprove apenas se você tiver certeza absoluta desta ação.
+            
+            Solicitado por: @${{ github.actor }}
+          exclude-workflow-initiator-as-approver: true
+
+  destroy:
+    name: Destroy Infrastructure
+    needs: approval
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Copy Environment Variables
+        run: |
+          cd infra
+          cp envs/${{ github.event.inputs.environment }}/${{ env.TF_VAR_FILE }} .
+
+      - name: Terraform Init
+        run: |
+          cd infra
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=moodle/${{ github.event.inputs.environment }}/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+
+      - name: Terraform Plan Destroy
+        id: plan-destroy
+        run: |
+          cd infra
+          terraform plan -destroy -var-file=${{ env.TF_VAR_FILE }} -no-color -out=tfdestroyplan
+
+      - name: Final Confirmation
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ secrets.GITHUB_TOKEN }}
+          approvers: ${{ vars.INFRASTRUCTURE_ADMINS }}
+          minimum-approvals: 2
+          issue-title: "⚠️ CONFIRMAÇÃO FINAL: Destruição do ambiente ${{ github.event.inputs.environment }}"
+          issue-body: |
+            ⚠️ CONFIRMAÇÃO FINAL NECESSÁRIA ⚠️
+            
+            O plano de destruição foi gerado para o ambiente ${{ github.event.inputs.environment }}.
+            
+            Esta é a última chance de cancelar esta operação destrutiva.
+            
+            Por favor, confirme apenas se você tiver revisado o plano e tiver absoluta certeza.
+            
+            Para proceder com a destruição, duas aprovações são necessárias.
+          exclude-workflow-initiator-as-approver: true
+
+      - name: Terraform Destroy
+        run: |
+          cd infra
+          terraform apply tfdestroyplan
+
+      - name: Send Slack Notification
+        uses: slackapi/slack-github-action@v1.23.0
+        with:
+          payload: |
+            {
+              "text": "⚠️ *Ambiente Destruído!*\n*Projeto:* Moodle 5.0\n*Ambiente:* ${{ github.event.inputs.environment }}\n*Responsável:* ${{ github.actor }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
