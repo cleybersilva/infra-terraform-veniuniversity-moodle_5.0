@@ -1,0 +1,54 @@
+graph TB
+    %% Definição do usuário/cliente
+    User((Usuário)) -->|Acessa| CloudFront
+    
+    %% CloudFront e WAF
+    CloudFront[CloudFront CDN] -->|Encaminha requisições| WAF
+    WAF[AWS WAF] -->|Protege| ALB
+    
+    subgraph "VPC"
+        %% Application Load Balancer
+        ALB[Application Load Balancer] -->|Distribui tráfego| ASG
+        
+        %% Zona Pública
+        subgraph "Subnet Pública"
+            ASG[Auto Scaling Group]
+        end
+        
+        %% Zona Privada
+        subgraph "Subnet Privada"
+            EC2_1[EC2 Instance 1]
+            EC2_2[EC2 Instance 2]
+            ASG --- EC2_1
+            ASG --- EC2_2
+            EC2_1 -->|Monta| EFS
+            EC2_2 -->|Monta| EFS
+            EC2_1 -->|Salva sessão| ElastiCache
+            EC2_2 -->|Salva sessão| ElastiCache
+            EC2_1 -->|Acessa| RDS
+            EC2_2 -->|Acessa| RDS
+            EC2_1 -->|Backup| S3
+            EC2_2 -->|Backup| S3
+        end
+        
+        %% Serviços de infraestrutura
+        subgraph "Subnet de Banco de Dados"
+            RDS[(RDS MySQL\nMulti-AZ)]
+        end
+        
+        EFS[(EFS\nStorage Compartilhado)]
+        ElastiCache[(ElastiCache Redis\nCache de Sessão)]
+    end
+    
+    %% Serviços complementares
+    S3[(S3 Bucket\nBackups)]
+    SecretsManager[(Secrets Manager\nSenhas e Credenciais)]
+    CloudWatch[CloudWatch\nMonitoramento e Logs]
+    
+    ASG -->|Logs e Métricas| CloudWatch
+    RDS -->|Logs e Métricas| CloudWatch
+    ElastiCache -->|Métricas| CloudWatch
+    WAF -->|Logs| CloudWatch
+    
+    EC2_1 -->|Obtém credenciais| SecretsManager
+    EC2_2 -->|Obtém credenciais| SecretsManager
