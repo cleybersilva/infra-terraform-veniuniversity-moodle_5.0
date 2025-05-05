@@ -1,0 +1,22 @@
+name: Rollback
+description: 'Rollback será baseado na última execução com sucesso'
+title: "Solução de Rollback"
+labels: [rollback]
+
+body:
+  - type: dropdown
+    id: Enviroment
+    attributes:
+      label: ">>Environment<<"
+      description: Insira o ambiente para rollback (dev/hom/prod)
+      options: ["dev", "hom", "prod"]
+
+  - type: input
+    attributes:
+      label: ">>custom-branch<<"
+      description: Insira o nome da branch customizada aqui
+
+  - type: input
+    attributes:
+      label: ">>gmud<<"
+      description: Insira o número da GMUD aqui
