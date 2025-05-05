@@ -1,0 +1,30 @@
+name: Cancel Deployment
+description: 'Cancelamento do deployment será feito enquanto o job de implantação estiver em execução.'
+title: 'Cancelamento Deployment'
+labels: [cancel-deployment]
+assignees: 
+  - default-assignee
+body:
+  - type: markdown
+    attributes:
+      value: 
+        Formulário de cancelamento de deployment em execução.
+        
+  - type: dropdown
+    id: Enviroment
+    attributes:
+      label: ">>Environment<<"
+      description: Insira o ambiente para cancelamento do deployment (dev/hom/prod)
+      options: ["dev", "hom", "prod"]
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: ">>custom-branch<<"
+      description: Insira o nome da branch customizada aqui
+    
+  - type: input
+    attributes:
+      label: ">>gmud<<"
+      description: Insira o número da GMUD 
