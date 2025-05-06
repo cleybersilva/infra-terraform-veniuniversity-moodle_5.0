@@ -1,4 +1,4 @@
-name: DevSecOps Pipeline
+name: DevSecOps Multi-Stage Pipeline
 
 on:
   push:
@@ -12,692 +12,243 @@ on:
       - release
       - main
 
-env:
-  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-  SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-  AWS_REGION: ${{ secrets.AWS_REGION }}
-  TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
-  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-
 jobs:
-  # =================================================================
-  # Etapa 1: Verificação de código e análise inicial de segurança
-  # =================================================================
-  code-quality:
-    name: Code Quality & SAST
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Set up Node.js # Exemplo para projetos Node.js; substitua conforme necessário
+        uses: actions/setup-node@v4
         with:
-          fetch-depth: 0
+          node-version: '20'
 
-      - name: Set environment based on branch
-        id: set-env
-        run: |
-          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
-            echo "ENVIRONMENT=prod" >> $GITHUB_ENV
-            echo "SECURITY_LEVEL=high" >> $GITHUB_ENV
-          elif [ "${{ github.ref }}" == "refs/heads/release" ]; then
-            echo "ENVIRONMENT=hom" >> $GITHUB_ENV
-            echo "SECURITY_LEVEL=medium" >> $GITHUB_ENV
-          else
-            echo "ENVIRONMENT=dev" >> $GITHUB_ENV
-            echo "SECURITY_LEVEL=standard" >> $GITHUB_ENV
-          fi
+      - name: Install dependencies
+        run: npm install # Adapte para sua linguagem/framework (ex.: pip, mvn, etc.)
 
-      - name: Cache dependencies
-        uses: actions/cache@v3
+      - name: Build project
+        run: npm run build # Adapte para seu comando de build
+
+      - name: Archive artifacts
+        uses: actions/upload-artifact@v4
         with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          name: build-artifact
+          path: dist/ # Ajuste conforme a pasta de saída do build
 
-      # Análise de qualidade do código
-      - name: Run ESLint (JavaScript/TypeScript)
-        if: hashFiles('**/*.js', '**/*.ts') != ''
-        run: |
-          npm install -g eslint
-          eslint .
+  sast:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Run Flake8 (Python)
-        if: hashFiles('**/*.py') != ''
-        run: |
-          pip install flake8
-          flake8 .
-
-      # Análise de Segurança Estática (SAST)
-      - name: Run Semgrep
-        uses: returntocorp/semgrep-action@v1
+      - name: Run Semgrep (SAST)
+        uses: semgrep/semgrep-action@v1
         with:
-          config: >-
-            p/owasp-top-ten 
-            p/security-audit
-            p/secrets
-          args: --sarif --output semgrep.sarif
-
-      - name: Run Bandit (Python SAST)
-        if: hashFiles('**/*.py') != ''
-        run: |
-          pip install bandit
-          bandit -r . -f json -o bandit-results.json
-
-      - name: Run npm audit (JavaScript/Node.js)
-        if: hashFiles('package.json') != ''
-        run: |
-          npm audit --json > npm-audit-results.json || true
-
-      - name: Run Safety Check (Python Dependencies)
-        if: hashFiles('requirements.txt') != ''
-        run: |
-          pip install safety
-          safety check -r requirements.txt --json > safety-results.json || true
-
-      # Secret Scanning
-      - name: Run Gitleaks for secret detection
-        uses: gitleaks/gitleaks-action@v2
-        with:
-          config-path: .github/gitleaks.toml
-          report-format: sarif
-          report-path: gitleaks-report.sarif
-
-      # Code Analysis with SonarCloud
-      - name: SonarCloud Scan
-        uses: SonarSource/sonarcloud-github-action@master
-        with:
-          args: >
-            -Dsonar.projectKey=${{ github.repository_owner }}_${{ github.event.repository.name }}
-            -Dsonar.organization=${{ github.repository_owner }}
-            -Dsonar.sources=.
-            -Dsonar.exclusions=**/*.test.*,**/*.spec.*,**/test/**,**/tests/**
+          config: p/default # Usa regras padrão; personalize com regras específicas
+          publishToken: ${{ secrets.SEMGREP_TOKEN }} # Opcional, para relatórios na nuvem
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SEMGREP_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Consolidar e publicar resultados
-      - name: Upload security scan results
-        uses: github/codeql-action/upload-sarif@v2
+      - name: Upload Semgrep results
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          sarif_file: gitleaks-report.sarif
-          category: secret-detection
+          name: semgrep-report
+          path: semgrep-results.json
 
-      - name: Upload semgrep results
-        uses: github/codeql-action/upload-sarif@v2
-        with:
-          sarif_file: semgrep.sarif
-          category: semgrep-results
-
-  # =================================================================
-  # Etapa 2: Verificação de segurança em dependências
-  # =================================================================
-  dependency-check:
-    name: Dependencies Security Check
+  sca:
     runs-on: ubuntu-latest
-    needs: code-quality
+    needs: build
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # OWASP Dependency Check
-      - name: Set up Java
-        uses: actions/setup-java@v3
+      - name: Set up Java # Necessário para Dependency-Check
+        uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
           java-version: '17'
+          distribution: 'temurin'
 
-      - name: OWASP Dependency Check
-        uses: dependency-check/Dependency-Check_Action@main
+      - name: Run OWASP Dependency-Check (SCA)
+        uses: dependency-check/Dependency-Check_Action@v4
         with:
-          project: '${{ github.event.repository.name }}'
-          path: '.'
-          format: 'HTML'
-          args: >
-            --failOnCVSS 7
-            --enableRetired
-            --suppression ./.github/dependency-check-suppressions.xml
+          project: 'my-project' # Ajuste o nome do projeto
+          path: '.' # Diretório do projeto
+          format: 'ALL' # Gera relatórios HTML, JSON e CycloneDX SBOM
+          args: '--enableRetired --out dependency-check-report'
 
-      - name: Upload Dependency Check results
-        uses: actions/upload-artifact@v3
+      - name: Upload Dependency-Check report
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: dependency-check-report
-          path: reports
+          path: dependency-check-report/
 
-      # Trivy Vulnerability Scanner para imagens Docker
-      - name: Trivy Scan
-        if: hashFiles('Dockerfile') != ''
-        uses: aquasecurity/trivy-action@master
+  dependency-track:
+    runs-on: ubuntu-latest
+    needs: sca
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Dependency-Check SBOM
+        uses: actions/download-artifact@v4
         with:
-          scan-type: 'fs'
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-          severity: 'CRITICAL,HIGH'
+          name: dependency-check-report
+          path: dependency-check-report/
 
-      - name: Upload Trivy results
-        if: hashFiles('Dockerfile') != ''
-        uses: github/codeql-action/upload-sarif@v2
-        with:
-          sarif_file: trivy-results.sarif
-          category: trivy-scan
-
-      # Snyk para verificação de vulnerabilidades em dependências
-      - name: Snyk Open Source Security Scan
-        uses: snyk/actions/node@master
-        continue-on-error: true
+      - name: Submit SBOM to OWASP Dependency-Track
+        run: |
+          curl -X "POST" "${{ secrets.DEPENDENCY_TRACK_URL }}/api/v1/bom" \
+            -H "Content-Type: multipart/form-data" \
+            -H "X-Api-Key: ${{ secrets.DEPENDENCY_TRACK_API_KEY }}" \
+            -F "projectName=my-project" \
+            -F "projectVersion=1.0" \
+            -F "bom=@dependency-check-report/dependency-check-report.xml"
         env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+          DEPENDENCY_TRACK_URL: ${{ secrets.DEPENDENCY_TRACK_URL }}
+
+      - name: Upload Dependency-Track submission log
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          args: --severity-threshold=high
+          name: dependency-track-log
+          path: dependency-track-submission.log
 
-      - name: Upload Snyk results
-        uses: actions/upload-artifact@v3
-        with:
-          name: snyk-results
-          path: snyk.json
-          if-no-files-found: ignore
-
-  # =================================================================
-  # Etapa 3: Análise de qualidade e segurança de infraestrutura
-  # =================================================================
-  infrastructure-analysis:
-    name: Infrastructure Security Analysis
-    runs-on: ubuntu-latest
-    needs: dependency-check
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # Verificação de Terraform com TFSec
-      - name: Run TFSec (Terraform Security Scanner)
-        if: hashFiles('infra/**/*.tf') != ''
-        uses: aquasecurity/tfsec-action@v1.0.0
-        with:
-          soft_fail: true
-          format: sarif
-          out: tfsec-results.sarif
-
-      - name: Upload TFSec results
-        if: hashFiles('infra/**/*.tf') != ''
-        uses: github/codeql-action/upload-sarif@v2
-        with:
-          sarif_file: tfsec-results.sarif
-          category: tfsec-results
-
-      # Análise de Terraform com Checkov
-      - name: Run Checkov (Infrastructure IaC Analysis)
-        uses: bridgecrewio/checkov-action@master
-        with:
-          directory: infra/
-          framework: terraform
-          soft_fail: true
-          output-format: sarif
-          output-file-path: checkov-results.sarif
-
-      - name: Upload Checkov results
-        uses: github/codeql-action/upload-sarif@v2
-        with:
-          sarif_file: checkov-results.sarif
-          category: checkov-results
-
-  # =================================================================
-  # Etapa 4: Build e tests para a aplicação
-  # =================================================================
-  build-and-test:
-    name: Build and Test Application
-    runs-on: ubuntu-latest
-    needs: infrastructure-analysis
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # Ambiente para build e testes
-      - name: Set up environment
-        run: |
-          if [ -f "package.json" ]; then
-            npm ci
-          elif [ -f "requirements.txt" ]; then
-            pip install -r requirements.txt
-          fi
-
-      # Executar testes unitários
-      - name: Run unit tests
-        run: |
-          if [ -f "package.json" ]; then
-            npm test || echo "Tests failed but continuing"
-          elif [ -f "requirements.txt" ]; then
-            python -m pytest || echo "Tests failed but continuing"
-          else
-            echo "No test framework detected"
-          fi
-
-      # Coverage report
-      - name: Generate coverage report
-        run: |
-          if [ -f "package.json" ]; then
-            npm run coverage || echo "Coverage failed but continuing"
-          elif [ -f "requirements.txt" ]; then
-            python -m pytest --cov=./ --cov-report=xml || echo "Coverage failed but continuing"
-          else
-            echo "No coverage framework detected"
-          fi
-      
-      # Build da aplicação
-      - name: Build application
-        run: |
-          if [ -f "package.json" ]; then
-            npm run build || echo "Build failed but continuing"
-          elif [ -f "setup.py" ]; then
-            pip install -e .
-          else
-            echo "No build method detected"
-          fi
-
-      # Upload dos artefatos de build
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v3
-        with:
-          name: build-artifacts
-          path: |
-            build/
-            dist/
-            out/
-            target/
-          if-no-files-found: ignore
-
-  # =================================================================
-  # Etapa 5: Testes DAST (Dynamic Application Security Testing)
-  # =================================================================
   dast:
-    name: DAST Security Scanning
     runs-on: ubuntu-latest
-    needs: build-and-test
-    # Executar DAST apenas nas branches release e main
+    needs: build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/release')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifact
+          path: dist/
+
+      - name: Start application # Exemplo: inicia um servidor web para testes
+        run: |
+          npm install -g serve
+          serve -s dist -p 8080 &
+          sleep 10 # Aguarda o servidor iniciar
+
+      - name: Run OWASP ZAP (DAST)
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: 'http://localhost:8080' # Ajuste para a URL da sua aplicação
+          fail_action: true # Falha a pipeline se vulnerabilidades críticas forem encontradas
+          cmd_options: '-I -j' # Ignora falsos positivos e gera relatório JSON
+
+      - name: Upload ZAP report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: zap_report.json
+
+  nist-compliance:
+    runs-on: ubuntu-latest
+    needs: build
     if: github.ref == 'refs/heads/release' || github.ref == 'refs/heads/main'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # OWASP ZAP Scan (Baseline scan)
-      - name: ZAP Baseline Scan
-        uses: zaproxy/action-baseline@v0.10.0
-        with:
-          target: 'https://www.example.com' # Substituir pela URL do ambiente de teste
-          rules_file_name: '.github/zap-rules.tsv'
-          cmd_options: '-a -j'
-
-      # OWASP ZAP Full Scan (apenas para ambiente de produção)
-      - name: ZAP Full Scan
-        if: github.ref == 'refs/heads/main'
-        uses: zaproxy/action-full-scan@v0.7.0
-        with:
-          target: 'https://www.example.com' # Substituir pela URL do ambiente de teste
-          rules_file_name: '.github/zap-rules.tsv'
-          cmd_options: '-a -j'
-
-      # Upload dos resultados do DAST
-      - name: Upload ZAP results
-        uses: actions/upload-artifact@v3
-        with:
-          name: zap-scan-results
-          path: reports/
-
-  # =================================================================
-  # Etapa 6: Verificação de conformidade com NIST
-  # =================================================================
-  compliance-check:
-    name: NIST Compliance Check
-    runs-on: ubuntu-latest
-    needs: dast
-    # Verificação de NIST apenas para branches release e main
-    if: github.ref == 'refs/heads/release' || github.ref == 'refs/heads/main'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # InSpec para verificação de conformidade com NIST
-      - name: Setup InSpec
+      - name: Install OpenSCAP
         run: |
-          curl https://omnitruck.chef.io/install.sh | sudo bash -s -- -P inspec
-          sudo inspec --version
+          sudo apt-get update
+          sudo apt-get install -y libopenscap8
 
-      # Executar verificação de conformidade NIST 800-53
-      - name: Run NIST 800-53 compliance checks
+      - name: Download NIST SCAP content
         run: |
-          sudo inspec exec https://github.com/mitre/canonical-ubuntu-18.04-lts-stig-baseline.git -t ssh://user:password@hostname --reporter json:inspec-results.json html:inspec-results.html || true
+          wget https://nvd.nist.gov/feeds/xml/scap/2.0/nist-scap-release-2-0.xml -O nist-scap.xml
 
-      # Executar verificação de conformidade NIST 800-171
-      - name: Run NIST 800-171 compliance checks
+      - name: Run OpenSCAP scan
         run: |
-          sudo inspec exec https://github.com/mitre/nist-800-171-cui-baseline.git -t ssh://user:password@hostname --reporter json:inspec-171-results.json html:inspec-171-results.html || true
+          oscap xccdf eval --profile xccdf_org.ssgproject.content_profile_nist_800_53 \
+            --results nist-results.xml \
+            --report nist-report.html \
+            nist-scap.xml
+        continue-on-error: true # Continua mesmo se houver falhas, para gerar relatórios
 
-      # Upload dos resultados de conformidade
-      - name: Upload compliance results
-        uses: actions/upload-artifact@v3
+      - name: Upload OpenSCAP report
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: compliance-results
-          path: |
-            inspec-*.json
-            inspec-*.html
+          name: nist-report
+          path: nist-report.html
 
-  # =================================================================
-  # Etapa 7: Verificação das configurações de segurança do AWS
-  # =================================================================
-  cloud-security:
-    name: Cloud Security Review
-    runs-on: ubuntu-latest
-    needs: compliance-check
-    # Cloud security reviews apenas para branches main e release
-    if: github.ref == 'refs/heads/release' || github.ref == 'refs/heads/main'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # Configurar AWS CLI
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      # Prowler para verificação de segurança na AWS
-      - name: Run Prowler AWS Security Assessment
-        run: |
-          docker run -e AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} \
-                     -e AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} \
-                     -e AWS_REGION=${{ env.AWS_REGION }} \
-                     toniblyx/prowler -M json-asff -F prowler-output.json -c check11,check12,check13,check14,check15
-        continue-on-error: true
-
-      # ScoutSuite para verificação de segurança na AWS
-      - name: Run ScoutSuite AWS Security Assessment
-        run: |
-          pip install scoutsuite
-          scout aws --report-dir scout-report --no-browser
-        continue-on-error: true
-
-      # Upload dos resultados de segurança na nuvem
-      - name: Upload cloud security results
-        uses: actions/upload-artifact@v3
-        with:
-          name: cloud-security-results
-          path: |
-            prowler-output.json
-            scout-report/
-
-  # =================================================================
-  # Etapa 8: Geração de relatório de segurança consolidado
-  # =================================================================
-  security-report:
-    name: Generate Security Report
-    runs-on: ubuntu-latest
-    needs: [code-quality, dependency-check, infrastructure-analysis, build-and-test, dast, compliance-check, cloud-security]
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # Download de todos os artefatos
-      - name: Download all artifacts
-        uses: actions/download-artifact@v3
-        with:
-          path: artifacts
-
-      # Gerar relatório HTML com DefectDojo
-      - name: Generate consolidated security report
-        run: |
-          echo "Generating consolidated security report from all scan results..."
-          mkdir -p security-report
-          
-          # Script simples para consolidar resultados em um relatório
-          cat > security-report/index.html << EOF
-          <!DOCTYPE html>
-          <html>
-          <head>
-            <title>Security Assessment Report</title>
-            <style>
-              body { font-family: Arial, sans-serif; line-height: 1.6; }
-              .container { width: 90%; margin: 0 auto; }
-              h1 { color: #333; }
-              .severity-high { color: #d9534f; }
-              .severity-medium { color: #f0ad4e; }
-              .severity-low { color: #5bc0de; }
-              table { border-collapse: collapse; width: 100%; }
-              th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-              th { background-color: #f2f2f2; }
-            </style>
-          </head>
-          <body>
-            <div class="container">
-              <h1>Security Assessment Report</h1>
-              <p>Generated on $(date) for branch ${{ github.ref_name }}</p>
-              
-              <h2>Summary</h2>
-              <p>This report consolidates the results of all security scans performed during the DevSecOps pipeline.</p>
-              
-              <h2>SAST Results</h2>
-              <p>Results from static application security testing tools.</p>
-              
-              <h2>Dependency Check Results</h2>
-              <p>Results from dependency vulnerability scanners.</p>
-              
-              <h2>Infrastructure Analysis</h2>
-              <p>Results from infrastructure as code security scanners.</p>
-              
-              <h2>DAST Results</h2>
-              <p>Results from dynamic application security testing.</p>
-              
-              <h2>Compliance Check</h2>
-              <p>Results from NIST compliance checks.</p>
-              
-              <h2>Cloud Security Review</h2>
-              <p>Results from cloud security assessments.</p>
-              
-              <h2>Recommendations</h2>
-              <p>Based on the findings, the following security improvements are recommended:</p>
-              <ul>
-                <li>Address all high and critical vulnerabilities before proceeding to production</li>
-                <li>Review and update security configurations for AWS resources</li>
-                <li>Ensure all dependencies are up-to-date</li>
-                <li>Implement proper secrets management</li>
-              </ul>
-            </div>
-          </body>
-          </html>
-          EOF
-
-      # Upload do relatório consolidado
-      - name: Upload consolidated security report
-        uses: actions/upload-artifact@v3
-        with:
-          name: consolidated-security-report
-          path: security-report/
-
-      # Enviar notificação no Slack
-      - name: Send Slack notification
-        uses: act10ns/slack@v1
-        with:
-          status: ${{ job.status }}
-          channel: '#security-alerts'
-          webhook-url: ${{ env.SLACK_WEBHOOK_URL }}
-          message: |
-            DevSecOps Pipeline Security Report para ${{ github.repository }} (Branch: ${{ github.ref_name }})
-            Status: ${{ job.status }}
-            Detalhes disponíveis no artifact: consolidated-security-report
-            Link para o workflow: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-  # =================================================================
-  # Etapa 9: Deploy para desenvolvimento (branch develop)
-  # =================================================================
   deploy-dev:
-    name: Deploy to Development
     runs-on: ubuntu-latest
-    needs: security-report
+    needs: [sast, sca, dependency-track, dast]
     if: github.ref == 'refs/heads/develop'
-    environment:
-      name: dev
+    environment: Development
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
         with:
-          terraform_version: "1.0.0"
+          name: build-artifact
+          path: dist/
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Deploy to Development
+      - name: Deploy to Dev # Exemplo: implantação em um serviço fictício
         run: |
-          cd infra
-          # Copiar variáveis de ambiente específicas para dev
-          cp envs/dev/terraform.tfvars .
-          
-          # Inicializar Terraform
-          terraform init \
-            -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
-            -backend-config="key=app/dev/terraform.tfstate" \
-            -backend-config="region=${{ env.AWS_REGION }}"
-          
-          # Aplicar configuração Terraform
-          terraform apply -var-file=terraform.tfvars -auto-approve
+          echo "Deploying to Development environment"
+          # Adapte para seu provedor (AWS, Azure, etc.)
+          # Exemplo: aws s3 sync dist/ s3://my-dev-bucket/
 
-      - name: Send Deployment Notification
-        uses: act10ns/slack@v1
-        with:
-          status: ${{ job.status }}
-          channel: '#deployments'
-          webhook-url: ${{ env.SLACK_WEBHOOK_URL }}
-          message: |
-            Deployment to Development Environment Completed
-            Repository: ${{ github.repository }}
-            Branch: develop
-            Status: ${{ job.status }}
-
-  # =================================================================
-  # Etapa 10: Deploy para homologação (branch release)
-  # =================================================================
-  deploy-hom:
-    name: Deploy to Homologation
+  deploy-qa:
     runs-on: ubuntu-latest
-    needs: security-report
+    needs: [sast, sca, dependency-track, dast, nist-compliance]
     if: github.ref == 'refs/heads/release'
-    environment:
-      name: hom
+    environment: QA
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
         with:
-          terraform_version: "1.0.0"
+          name: build-artifact
+          path: dist/
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Deploy to Homologation
+      - name: Deploy to QA
         run: |
-          cd infra
-          # Copiar variáveis de ambiente específicas para homologação
-          cp envs/hom/terraform.tfvars .
-          
-          # Inicializar Terraform
-          terraform init \
-            -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
-            -backend-config="key=app/hom/terraform.tfstate" \
-            -backend-config="region=${{ env.AWS_REGION }}"
-          
-          # Aplicar configuração Terraform
-          terraform apply -var-file=terraform.tfvars -auto-approve
+          echo "Deploying to QA environment"
+          # Adapte para seu provedor
+          # Exemplo: az webapp deploy --resource-group my-group --name my-qa-app
 
-      - name: Send Deployment Notification
-        uses: act10ns/slack@v1
-        with:
-          status: ${{ job.status }}
-          channel: '#deployments'
-          webhook-url: ${{ env.SLACK_WEBHOOK_URL }}
-          message: |
-            Deployment to Homologation Environment Completed
-            Repository: ${{ github.repository }}
-            Branch: release
-            Status: ${{ job.status }}
-
-  # =================================================================
-  # Etapa 11: Deploy para produção (branch main)
-  # =================================================================
   deploy-prod:
-    name: Deploy to Production
     runs-on: ubuntu-latest
-    needs: security-report
+    needs: [sast, sca, dependency-track, dast, nist-compliance]
     if: github.ref == 'refs/heads/main'
-    environment:
-      name: prod
-      url: https://www.example.com
+    environment: Production
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Wait for Approval
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifact
+          path: dist/
+
+      - name: Manual approval
         uses: trstringer/manual-approval@v1
         with:
           secret: ${{ secrets.GITHUB_TOKEN }}
-          approvers: ${{ vars.PROD_APPROVERS }}
-          minimum-approvals: 2
-          issue-title: "Aprovação para deploy em Produção"
-          issue-body: "Por favor, aprove o deploy da infraestrutura em PRODUÇÃO após revisar o relatório de segurança."
-          exclude-workflow-initiator-as-approver: false
+          approvers: owner # Substitua pelo usuário ou grupo apropriado
+          minimum-approvals: 1
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: "1.0.0"
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Deploy to Production
+      - name: Deploy to Prod
         run: |
-          cd infra
-          # Copiar variáveis de ambiente específicas para produção
-          cp envs/prod/terraform.tfvars .
-          
-          # Inicializar Terraform
-          terraform init \
-            -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
-            -backend-config="key=app/prod/terraform.tfstate" \
-            -backend-config="region=${{ env.AWS_REGION }}"
-          
-          # Aplicar configuração Terraform
-          terraform apply -var-file=terraform.tfvars -auto-approve
-
-      - name: Security Post-Deployment Verification
-        run: |
-          # Executar verificações de segurança pós-implantação
-          echo "Executando verificações de segurança pós-implantação..."
-          # Adicionar comandos específicos para verificação pós-implantação
-
-      - name: Send Deployment Notification
-        uses: act10ns/slack@v1
-        with:
-          status: ${{ job.status }}
-          channel: '#deployments'
-          webhook-url: ${{ env.SLACK_WEBHOOK_URL }}
-          message: |
-            Deployment to Production Environment Completed
-            Repository: ${{ github.repository }}
-            Branch: main
-            Status: ${{ job.status }}
-            Approved by: ${{ github.event.sender.login }}
+          echo "Deploying to Production environment"
+          # Adapte para seu provedor
+          # Exemplo: gcloud app deploy dist/app.yaml
